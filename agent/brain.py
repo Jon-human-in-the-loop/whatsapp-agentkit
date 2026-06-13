@@ -40,13 +40,27 @@ def obtener_mensaje_fallback(tenant_id: str = DEFAULT_TENANT_ID) -> str:
     return gestor_tenants.obtener_tenant(tenant_id).fallback_message
 
 
+def _componer_system_prompt(base: str, contexto_rag: str, contexto_memoria: str) -> str:
+    """Inyecta el contexto RAG y la memoria de largo plazo en el system prompt."""
+    extra = ""
+    if contexto_rag:
+        extra += f"\n\n## Información relevante del negocio\n{contexto_rag}"
+    if contexto_memoria:
+        extra += f"\n\n## Lo que sabés de este cliente (conversaciones previas)\n{contexto_memoria}"
+    return base + extra
+
+
 async def generar_respuesta(mensaje: str, historial: list[dict],
-                            tenant_id: str = DEFAULT_TENANT_ID) -> str:
+                            tenant_id: str = DEFAULT_TENANT_ID,
+                            contexto_rag: str = "",
+                            contexto_memoria: str = "") -> str:
     """Genera una respuesta usando el LLM configurado, con fallback automático."""
     if not mensaje or len(mensaje.strip()) < 2:
         return obtener_mensaje_fallback(tenant_id)
 
-    system_prompt = cargar_system_prompt(tenant_id)
+    system_prompt = _componer_system_prompt(
+        cargar_system_prompt(tenant_id), contexto_rag, contexto_memoria
+    )
 
     # LiteLLM usa el formato OpenAI: system va como primer mensaje
     mensajes = [{"role": "system", "content": system_prompt}]

@@ -20,6 +20,8 @@ from agent.memory import (
 )
 from agent.channels import obtener_canal, CanalBase, MensajeUnificado
 from agent.tenants import gestor_tenants
+from agent.memory.knowledge import indexar_knowledge_base, buscar_en_knowledge
+from agent.memory.long_term import recuperar_contexto_relevante, guardar_resumen_si_necesario
 from agent.security import (
     validar_configuracion,
     sanitizar_mensaje,
@@ -61,10 +63,22 @@ async def _arrancar_canales_polling() -> None:
         _canales_polling.append(canal_email)
 
 
+async def _indexar_conocimiento() -> None:
+    """Auto-indexa la base de conocimiento de cada tenant al arrancar."""
+    for tenant_id in gestor_tenants.listar_tenants():
+        try:
+            n = await indexar_knowledge_base(tenant_id)
+            if n:
+                logger.info(f"[{tenant_id}] {n} chunks indexados en knowledge base")
+        except Exception as e:
+            logger.error(f"Error indexando knowledge de {tenant_id}: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await inicializar_db()
     logger.info("Base de datos inicializada")
+    await _indexar_conocimiento()
     await canal.iniciar()
     await _arrancar_canales_polling()
     logger.info(f"Servidor AgentKit — HELIX · AI corriendo en puerto {PORT}")
@@ -131,10 +145,21 @@ async def procesar_mensaje(canal_obj: CanalBase, msg: MensajeUnificado) -> None:
         )
 
         historial = await obtener_historial(msg.tenant_id, usuario_pk)
-        respuesta = await generar_respuesta(texto, historial, msg.tenant_id)
+
+        # Contexto: RAG sobre el knowledge base + memoria de largo plazo del cliente
+        contexto_rag = await buscar_en_knowledge(msg.tenant_id, texto)
+        contexto_memoria = await recuperar_contexto_relevante(msg.tenant_id, usuario_pk, texto)
+
+        respuesta = await generar_respuesta(
+            texto, historial, msg.tenant_id,
+            contexto_rag=contexto_rag, contexto_memoria=contexto_memoria,
+        )
 
         await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "user", texto)
         await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "assistant", respuesta)
+
+        # Si la conversación acumuló suficientes mensajes, resumir para la memoria larga
+        await guardar_resumen_si_necesario(msg.tenant_id, usuario_pk)
 
         bloques = partir_en_bloques(respuesta)
         for i, bloque in enumerate(bloques):

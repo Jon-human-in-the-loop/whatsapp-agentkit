@@ -111,3 +111,72 @@ class TestTelegram:
         )
         msgs = await canal.parsear_webhook(req)
         assert len(msgs) == 1
+
+
+# ─── Discord ─────────────────────────────────────────────────────────────────
+
+class TestDiscord:
+    def setup_method(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        self.sk = Ed25519PrivateKey.generate()
+        pub = self.sk.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        os.environ["DISCORD_PUBLIC_KEY"] = pub.hex()
+
+    def teardown_method(self):
+        os.environ.pop("DISCORD_PUBLIC_KEY", None)
+
+    def _canal(self):
+        from agent.channels.discord import CanalDiscord
+        return CanalDiscord("demo")
+
+    def _firmar(self, body: bytes, timestamp: str = "1700000000") -> dict:
+        firma = self.sk.sign(timestamp.encode() + body).hex()
+        return {"X-Signature-Ed25519": firma, "X-Signature-Timestamp": timestamp}
+
+    async def test_ping_responde_pong(self):
+        body = json.dumps({"type": 1}).encode()
+        req = make_request(body, headers=self._firmar(body), method="POST")
+        resultado = await self._canal().validar_webhook(req)
+        assert resultado == {"type": 1}
+
+    async def test_firma_invalida_rechaza(self):
+        from fastapi import HTTPException
+        body = json.dumps({"type": 1}).encode()
+        headers = {"X-Signature-Ed25519": "00" * 64, "X-Signature-Timestamp": "123"}
+        with pytest.raises(HTTPException) as exc:
+            await self._canal().validar_webhook(make_request(body, headers=headers))
+        assert exc.value.status_code == 401
+
+    async def test_normaliza_slash_command(self):
+        interaction = {
+            "id": "999",
+            "type": 2,
+            "channel_id": "555",
+            "member": {"user": {"id": "77", "username": "ana", "global_name": "Ana"}},
+            "data": {
+                "name": "chat",
+                "options": [{"name": "mensaje", "type": 3, "value": "Hola agente"}],
+            },
+        }
+        body = json.dumps(interaction).encode()
+        req = make_request(body, headers=self._firmar(body))
+        msgs = await self._canal().parsear_webhook(req)
+        assert len(msgs) == 1
+        m = msgs[0]
+        assert m.canal == TipoCanal.DISCORD
+        assert m.usuario_id == "77"
+        assert m.usuario_nombre == "Ana"
+        assert m.texto == "Hola agente"
+        assert m.mensaje_id == "999"
+        assert m.metadata.get("channel_id") == "555"
+
+    async def test_ignora_tipo_no_command(self):
+        interaction = {"id": "1", "type": 5, "data": {}}  # MODAL_SUBMIT u otro
+        body = json.dumps(interaction).encode()
+        req = make_request(body, headers=self._firmar(body))
+        msgs = await self._canal().parsear_webhook(req)
+        assert msgs == []

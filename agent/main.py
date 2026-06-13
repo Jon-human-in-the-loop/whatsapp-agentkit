@@ -1,11 +1,14 @@
-# agent/main.py — Servidor FastAPI + Webhook de WhatsApp — HELIX · AI
+# agent/main.py — Servidor FastAPI + router multi-canal / multi-tenant
+# HELIX · AI / AgentKit
+
 import os
+import re
 import asyncio
 import random
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import PlainTextResponse, JSONResponse, Response
 from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
@@ -15,7 +18,7 @@ from agent.memory import (
     guardar_mensaje,
     obtener_historial,
 )
-from agent.channels import obtener_canal
+from agent.channels import obtener_canal, CanalBase, MensajeUnificado
 from agent.security import (
     validar_configuracion,
     sanitizar_mensaje,
@@ -33,10 +36,10 @@ logger = logging.getLogger("agentkit")
 
 validar_configuracion()
 
-# Tenant por defecto mientras el sistema es single-tenant.
-# La arquitectura multi-tenant (Fase 2) resuelve el tenant desde la URL.
+# Tenant por defecto para la ruta legacy /webhook (single-tenant).
+# La ruta /webhook/{canal}/{tenant_id} resuelve el tenant desde la URL.
 TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo")
-# Canal principal de WhatsApp (Twilio o Meta), asociado al tenant por defecto.
+# Canal principal de WhatsApp (Twilio o Meta) para la ruta legacy /webhook.
 canal = obtener_canal(os.getenv("WHATSAPP_PROVIDER", ""), TENANT_ID)
 PORT = int(os.getenv("PORT", 8000))
 
@@ -47,16 +50,126 @@ async def lifespan(app: FastAPI):
     logger.info("Base de datos inicializada")
     await canal.iniciar()
     logger.info(f"Servidor AgentKit — HELIX · AI corriendo en puerto {PORT}")
-    logger.info(f"Canal activo: {canal.__class__.__name__} (tenant: {TENANT_ID})")
+    logger.info(f"Canal legacy activo: {canal.__class__.__name__} (tenant: {TENANT_ID})")
     yield
 
 
 app = FastAPI(
     title="Sofía — Agente WhatsApp de HELIX · AI",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
+
+# ─── Helpers de procesamiento ────────────────────────────────────────────────
+
+def partir_en_bloques(respuesta: str, max_len: int = 280) -> list[str]:
+    """
+    Parte una respuesta larga en bloques cortos estilo chat humano:
+    primero por párrafos dobles, y si no hay, por oraciones.
+    """
+    bloques = [b.strip() for b in respuesta.split("\n\n") if b.strip()]
+    if len(bloques) == 1 and len(respuesta) > max_len:
+        partes = re.split(r"(?<=[.!?])\s+", respuesta)
+        bloques = []
+        actual = ""
+        for parte in partes:
+            if len(actual) + len(parte) < max_len:
+                actual = (actual + " " + parte).strip()
+            else:
+                if actual:
+                    bloques.append(actual)
+                actual = parte
+        if actual:
+            bloques.append(actual)
+    return bloques or [respuesta]
+
+
+async def procesar_mensaje(canal_obj: CanalBase, msg: MensajeUnificado) -> None:
+    """
+    Procesa un mensaje entrante: rate limit, sanitización, generación de
+    respuesta con memoria del tenant y envío humanizado. Pensado para correr
+    en background (la idempotencia ya se marcó antes de agendar esta tarea).
+    """
+    try:
+        if rate_limit_excedido(msg.usuario_id):
+            logger.warning(f"Rate limit excedido: {msg.usuario_id}")
+            await canal_obj.enviar_mensaje(
+                msg.usuario_id,
+                "Enviaste muchos mensajes muy rápido. Por favor esperá un momento e intentá de nuevo 🙏",
+                msg.thread_id,
+            )
+            return
+
+        texto = sanitizar_mensaje(msg.texto)
+        if not texto:
+            return
+
+        logger.info(f"[{msg.tenant_id}/{msg.canal.value}] Mensaje de {msg.usuario_id}: {texto}")
+
+        # Resolver el usuario interno (lo crea si es la primera vez)
+        usuario_pk = await obtener_o_crear_usuario(
+            msg.tenant_id, msg.canal.value, msg.usuario_id, msg.usuario_nombre
+        )
+
+        historial = await obtener_historial(msg.tenant_id, usuario_pk)
+        respuesta = await generar_respuesta(texto, historial, msg.tenant_id)
+
+        await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "user", texto)
+        await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "assistant", respuesta)
+
+        bloques = partir_en_bloques(respuesta)
+        for i, bloque in enumerate(bloques):
+            # Delay humano: más largo para el primer mensaje, más corto entre bloques
+            if i == 0:
+                delay = min(2 + len(bloque) / 80, 8) + random.uniform(0, 1.5)
+            else:
+                delay = random.uniform(1.5, 3)
+            await asyncio.sleep(delay)
+            await canal_obj.enviar_mensaje(msg.usuario_id, bloque, msg.thread_id)
+
+        logger.info(f"Respuesta a {msg.usuario_id} ({len(bloques)} bloque/s): {respuesta[:80]}...")
+
+    except Exception as e:
+        logger.error(f"Error procesando mensaje de {msg.usuario_id}: {e}")
+
+
+def responder_verificacion(resultado):
+    """
+    Traduce el valor de validar_webhook() a una respuesta HTTP adecuada:
+    None → no aplica; dict → JSON (Discord PONG); int/str → texto plano
+    (Meta hub.challenge, Slack url_verification).
+    """
+    if resultado is None:
+        return None
+    if isinstance(resultado, Response):
+        return resultado
+    if isinstance(resultado, dict):
+        return JSONResponse(resultado)
+    return PlainTextResponse(str(resultado))
+
+
+async def manejar_webhook(canal_obj: CanalBase, request: Request,
+                          background_tasks: BackgroundTasks) -> dict:
+    """
+    Lógica común a todas las rutas de webhook: parsea, deduplica y agenda el
+    procesamiento en background para responder 200 de inmediato (Slack exige
+    < 3s; Meta reenvía si no respondemos en ~20s).
+    """
+    mensajes = await canal_obj.parsear_webhook(request)
+    for msg in mensajes:
+        if msg.es_propio or not msg.texto:
+            continue
+        # Idempotencia: marcar de forma síncrona para deduplicar retries
+        if ya_procesado(msg.mensaje_id):
+            logger.info(f"Mensaje duplicado ignorado: {msg.mensaje_id}")
+            continue
+        marcar_procesado(msg.mensaje_id)
+        background_tasks.add_task(procesar_mensaje, canal_obj, msg)
+    return {"status": "ok"}
+
+
+# ─── Rutas ───────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def health_check():
@@ -65,84 +178,49 @@ async def health_check():
 
 @app.get("/webhook")
 async def webhook_verificacion(request: Request):
-    resultado = await canal.validar_webhook(request)
-    if resultado is not None:
-        return PlainTextResponse(str(resultado))
-    return {"status": "ok"}
+    """Verificación GET del canal legacy (WhatsApp Meta la requiere)."""
+    respuesta = responder_verificacion(await canal.validar_webhook(request))
+    return respuesta if respuesta is not None else {"status": "ok"}
 
 
 @app.post("/webhook")
-async def webhook_handler(request: Request):
+async def webhook_handler(request: Request, background_tasks: BackgroundTasks):
+    """Ruta legacy single-tenant: usa el canal de WhatsApp configurado en .env."""
     try:
-        mensajes = await canal.parsear_webhook(request)
-
-        for msg in mensajes:
-            if msg.es_propio or not msg.texto:
-                continue
-
-            if ya_procesado(msg.mensaje_id):
-                logger.info(f"Mensaje duplicado ignorado: {msg.mensaje_id}")
-                continue
-            marcar_procesado(msg.mensaje_id)
-
-            if rate_limit_excedido(msg.usuario_id):
-                logger.warning(f"Rate limit excedido: {msg.usuario_id}")
-                await canal.enviar_mensaje(
-                    msg.usuario_id,
-                    "Enviaste muchos mensajes muy rápido. Por favor esperá un momento e intentá de nuevo 🙏",
-                    msg.thread_id,
-                )
-                continue
-
-            msg.texto = sanitizar_mensaje(msg.texto)
-            if not msg.texto:
-                continue
-
-            logger.info(f"[{msg.tenant_id}] Mensaje de {msg.usuario_id}: {msg.texto}")
-
-            # Resolver el usuario interno (lo crea si es la primera vez)
-            usuario_pk = await obtener_o_crear_usuario(
-                msg.tenant_id, msg.canal.value, msg.usuario_id, msg.usuario_nombre
-            )
-
-            historial = await obtener_historial(msg.tenant_id, usuario_pk)
-            respuesta = await generar_respuesta(msg.texto, historial, msg.tenant_id)
-
-            await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "user", msg.texto)
-            await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "assistant", respuesta)
-
-            # Partir en bloques si hay párrafos dobles o la respuesta es larga
-            bloques = [b.strip() for b in respuesta.split("\n\n") if b.strip()]
-            if len(bloques) == 1 and len(respuesta) > 280:
-                # Partir por oraciones si no hay saltos de párrafo
-                import re
-                partes = re.split(r'(?<=[.!?])\s+', respuesta)
-                bloques = []
-                actual = ""
-                for parte in partes:
-                    if len(actual) + len(parte) < 280:
-                        actual = (actual + " " + parte).strip()
-                    else:
-                        if actual:
-                            bloques.append(actual)
-                        actual = parte
-                if actual:
-                    bloques.append(actual)
-
-            for i, bloque in enumerate(bloques):
-                # Delay humano: más largo para el primer mensaje, más corto entre bloques
-                if i == 0:
-                    delay = min(2 + len(bloque) / 80, 8) + random.uniform(0, 1.5)
-                else:
-                    delay = random.uniform(1.5, 3)
-                await asyncio.sleep(delay)
-                await canal.enviar_mensaje(msg.usuario_id, bloque, msg.thread_id)
-
-            logger.info(f"Respuesta a {msg.usuario_id} ({len(bloques)} bloque/s): {respuesta[:80]}...")
-
-        return {"status": "ok"}
-
+        return await manejar_webhook(canal, request, background_tasks)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error en webhook: {e}")
+        detail = str(e) if ENVIRONMENT == "development" else "Error interno"
+        raise HTTPException(status_code=500, detail=detail)
+
+
+@app.get("/webhook/{canal_nombre}/{tenant_id}")
+async def webhook_verificacion_multi(canal_nombre: str, tenant_id: str, request: Request):
+    """Verificación GET por canal+tenant (Meta hub.challenge, Slack url_verification)."""
+    canal_obj = obtener_canal(canal_nombre, tenant_id)
+    respuesta = responder_verificacion(await canal_obj.validar_webhook(request))
+    return respuesta if respuesta is not None else {"status": "ok"}
+
+
+@app.post("/webhook/{canal_nombre}/{tenant_id}")
+async def webhook_handler_multi(canal_nombre: str, tenant_id: str,
+                                request: Request, background_tasks: BackgroundTasks):
+    """Ruta multi-canal / multi-tenant: POST /webhook/{canal}/{tenant_id}."""
+    try:
+        canal_obj = obtener_canal(canal_nombre, tenant_id)
+        # Slack (url_verification) y Discord (PING) verifican por POST
+        verificacion = responder_verificacion(await canal_obj.validar_webhook(request))
+        if verificacion is not None:
+            return verificacion
+        return await manejar_webhook(canal_obj, request, background_tasks)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # Canal no soportado o no implementado
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error en webhook {canal_nombre}/{tenant_id}: {e}")
         detail = str(e) if ENVIRONMENT == "development" else "Error interno"
         raise HTTPException(status_code=500, detail=detail)

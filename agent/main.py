@@ -92,6 +92,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Panel de administración (API REST) — autenticado con X-Admin-Key
+from admin.api import router as admin_router  # noqa: E402
+app.include_router(admin_router)
+
 
 # ─── Helpers de procesamiento ────────────────────────────────────────────────
 

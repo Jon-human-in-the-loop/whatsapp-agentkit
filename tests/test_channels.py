@@ -256,3 +256,54 @@ class TestSlack:
         req = make_request(body, headers=self._firmar(body))
         msgs = await self._canal().parsear_webhook(req)
         assert msgs[0].es_propio is True
+
+
+# ─── Email ───────────────────────────────────────────────────────────────────
+
+class TestEmail:
+    def _canal(self):
+        from agent.channels.email import CanalEmail
+        return CanalEmail("demo")
+
+    def _email_crudo(self, de="Ana Pérez <ana@cliente.com>", asunto="Consulta",
+                     cuerpo="Hola, quiero información", message_id="<abc@cliente.com>"):
+        from email.message import EmailMessage
+        em = EmailMessage()
+        em["From"] = de
+        em["To"] = "soporte@empresa.com"
+        em["Subject"] = asunto
+        em["Message-ID"] = message_id
+        em.set_content(cuerpo)
+        return em.as_bytes()
+
+    def test_normaliza_email_simple(self):
+        msg = self._canal()._email_a_mensaje(self._email_crudo())
+        assert msg is not None
+        assert msg.canal == TipoCanal.EMAIL
+        assert msg.usuario_id == "ana@cliente.com"
+        assert msg.usuario_nombre == "Ana Pérez"
+        assert "quiero información" in msg.texto
+        assert msg.mensaje_id == "<abc@cliente.com>"
+        assert msg.metadata.get("asunto") == "Consulta"
+        assert msg.es_propio is False
+
+    def test_email_multipart_extrae_texto_plano(self):
+        from email.message import EmailMessage
+        em = EmailMessage()
+        em["From"] = "x@y.com"
+        em["Subject"] = "hola"
+        em.set_content("texto plano del cuerpo")
+        em.add_alternative("<p>versión html</p>", subtype="html")
+        msg = self._canal()._email_a_mensaje(em.as_bytes())
+        assert "texto plano del cuerpo" in msg.texto
+
+    def test_email_sin_remitente_se_ignora(self):
+        from email.message import EmailMessage
+        em = EmailMessage()
+        em["Subject"] = "sin from"
+        em.set_content("cuerpo")
+        assert self._canal()._email_a_mensaje(em.as_bytes()) is None
+
+    async def test_parsear_webhook_vacio(self):
+        # Email no usa webhook → siempre lista vacía
+        assert await self._canal().parsear_webhook(make_request(b"{}")) == []

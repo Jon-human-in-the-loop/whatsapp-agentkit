@@ -19,6 +19,7 @@ from agent.memory import (
     obtener_historial,
 )
 from agent.channels import obtener_canal, CanalBase, MensajeUnificado
+from agent.tenants import gestor_tenants
 from agent.security import (
     validar_configuracion,
     sanitizar_mensaje,
@@ -43,12 +44,29 @@ TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo")
 canal = obtener_canal(os.getenv("WHATSAPP_PROVIDER", ""), TENANT_ID)
 PORT = int(os.getenv("PORT", 8000))
 
+# Canales que requieren polling (Email) se arrancan al boot y se mantienen vivos.
+_canales_polling: list[CanalBase] = []
+
+
+async def _arrancar_canales_polling() -> None:
+    """Arranca los canales basados en polling (Email) de cada tenant que los habilite."""
+    for tenant_id in gestor_tenants.listar_tenants():
+        cfg = gestor_tenants.obtener_tenant(tenant_id)
+        if "email" not in cfg.canales:
+            continue
+        canal_email = obtener_canal("email", tenant_id)
+        # Inyectar el dispatcher para no crear dependencia circular channels→main
+        canal_email.procesar = procesar_mensaje
+        await canal_email.iniciar()
+        _canales_polling.append(canal_email)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await inicializar_db()
     logger.info("Base de datos inicializada")
     await canal.iniciar()
+    await _arrancar_canales_polling()
     logger.info(f"Servidor AgentKit — HELIX · AI corriendo en puerto {PORT}")
     logger.info(f"Canal legacy activo: {canal.__class__.__name__} (tenant: {TENANT_ID})")
     yield

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
 from agent.memory import inicializar_db, guardar_mensaje, obtener_historial
-from agent.providers import obtener_proveedor
+from agent.channels import obtener_canal
 from agent.security import (
     validar_configuracion,
     sanitizar_mensaje,
@@ -27,7 +27,12 @@ logging.basicConfig(level=log_level)
 logger = logging.getLogger("agentkit")
 
 validar_configuracion()
-proveedor = obtener_proveedor()
+
+# Tenant por defecto mientras el sistema es single-tenant.
+# La arquitectura multi-tenant (Fase 2) resuelve el tenant desde la URL.
+TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo")
+# Canal principal de WhatsApp (Twilio o Meta), asociado al tenant por defecto.
+canal = obtener_canal(os.getenv("WHATSAPP_PROVIDER", ""), TENANT_ID)
 PORT = int(os.getenv("PORT", 8000))
 
 
@@ -35,8 +40,9 @@ PORT = int(os.getenv("PORT", 8000))
 async def lifespan(app: FastAPI):
     await inicializar_db()
     logger.info("Base de datos inicializada")
+    await canal.iniciar()
     logger.info(f"Servidor AgentKit — HELIX · AI corriendo en puerto {PORT}")
-    logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
+    logger.info(f"Canal activo: {canal.__class__.__name__} (tenant: {TENANT_ID})")
     yield
 
 
@@ -54,7 +60,7 @@ async def health_check():
 
 @app.get("/webhook")
 async def webhook_verificacion(request: Request):
-    resultado = await proveedor.validar_webhook(request)
+    resultado = await canal.validar_webhook(request)
     if resultado is not None:
         return PlainTextResponse(str(resultado))
     return {"status": "ok"}
@@ -63,7 +69,7 @@ async def webhook_verificacion(request: Request):
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     try:
-        mensajes = await proveedor.parsear_webhook(request)
+        mensajes = await canal.parsear_webhook(request)
 
         for msg in mensajes:
             if msg.es_propio or not msg.texto:
@@ -74,11 +80,12 @@ async def webhook_handler(request: Request):
                 continue
             marcar_procesado(msg.mensaje_id)
 
-            if rate_limit_excedido(msg.telefono):
-                logger.warning(f"Rate limit excedido: {msg.telefono}")
-                await proveedor.enviar_mensaje(
-                    msg.telefono,
-                    "Enviaste muchos mensajes muy rápido. Por favor esperá un momento e intentá de nuevo 🙏"
+            if rate_limit_excedido(msg.usuario_id):
+                logger.warning(f"Rate limit excedido: {msg.usuario_id}")
+                await canal.enviar_mensaje(
+                    msg.usuario_id,
+                    "Enviaste muchos mensajes muy rápido. Por favor esperá un momento e intentá de nuevo 🙏",
+                    msg.thread_id,
                 )
                 continue
 
@@ -86,13 +93,13 @@ async def webhook_handler(request: Request):
             if not msg.texto:
                 continue
 
-            logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
+            logger.info(f"Mensaje de {msg.usuario_id}: {msg.texto}")
 
-            historial = await obtener_historial(msg.telefono)
+            historial = await obtener_historial(msg.usuario_id)
             respuesta = await generar_respuesta(msg.texto, historial)
 
-            await guardar_mensaje(msg.telefono, "user", msg.texto)
-            await guardar_mensaje(msg.telefono, "assistant", respuesta)
+            await guardar_mensaje(msg.usuario_id, "user", msg.texto)
+            await guardar_mensaje(msg.usuario_id, "assistant", respuesta)
 
             # Partir en bloques si hay párrafos dobles o la respuesta es larga
             bloques = [b.strip() for b in respuesta.split("\n\n") if b.strip()]
@@ -119,9 +126,9 @@ async def webhook_handler(request: Request):
                 else:
                     delay = random.uniform(1.5, 3)
                 await asyncio.sleep(delay)
-                await proveedor.enviar_mensaje(msg.telefono, bloque)
+                await canal.enviar_mensaje(msg.usuario_id, bloque, msg.thread_id)
 
-            logger.info(f"Respuesta a {msg.telefono} ({len(bloques)} bloque/s): {respuesta[:80]}...")
+            logger.info(f"Respuesta a {msg.usuario_id} ({len(bloques)} bloque/s): {respuesta[:80]}...")
 
         return {"status": "ok"}
 

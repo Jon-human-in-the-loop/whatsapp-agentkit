@@ -1,20 +1,14 @@
-# agent/providers/__init__.py — Factory de proveedores
+# agent/providers/__init__.py — Shim de compatibilidad
+#
+# Reemplazado por agent/channels/. Mantenemos obtener_proveedor() delegando
+# a la nueva factory para no romper código o configuraciones legacy.
+
 import os
-from agent.providers.base import ProveedorWhatsApp
+from agent.channels import obtener_canal, CanalBase
 
 
-def obtener_proveedor() -> ProveedorWhatsApp:
-    """Retorna el proveedor de WhatsApp configurado en .env."""
-    proveedor = os.getenv("WHATSAPP_PROVIDER", "").lower()
-
-    if not proveedor:
-        raise ValueError("WHATSAPP_PROVIDER no configurado en .env. Usa: meta o twilio")
-
-    if proveedor == "meta":
-        from agent.providers.meta import ProveedorMeta
-        return ProveedorMeta()
-    elif proveedor == "twilio":
-        from agent.providers.twilio import ProveedorTwilio
-        return ProveedorTwilio()
-    else:
-        raise ValueError(f"Proveedor no soportado: {proveedor}. Usa: meta o twilio")
+def obtener_proveedor() -> CanalBase:
+    """Compat: retorna el canal de WhatsApp configurado en WHATSAPP_PROVIDER."""
+    proveedor = os.getenv("WHATSAPP_PROVIDER", "")
+    tenant_id = os.getenv("DEFAULT_TENANT_ID", "demo")
+    return obtener_canal(proveedor, tenant_id)

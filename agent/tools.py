@@ -1,48 +1,50 @@
 # agent/tools.py — Herramientas del agente HELIX · AI
 import os
 import pathlib
-import yaml
 import logging
+
+from agent.tenants import gestor_tenants, DEFAULT_TENANT_ID
 
 logger = logging.getLogger("agentkit")
 
 MAX_BYTES_ARCHIVO = 5 * 1024 * 1024
 MAX_RESULTADOS = 5
-KNOWLEDGE_DIR = pathlib.Path("knowledge").resolve()
+KNOWLEDGE_BASE = pathlib.Path("knowledge")
 
 
-def cargar_info_negocio() -> dict:
-    try:
-        with open("config/business.yaml", "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        logger.error("config/business.yaml no encontrado")
-        return {}
+def _knowledge_dir(tenant_id: str) -> pathlib.Path:
+    """Carpeta de conocimiento del tenant: knowledge/{tenant_id}/."""
+    return (KNOWLEDGE_BASE / tenant_id).resolve()
 
 
-def obtener_horario() -> dict:
-    info = cargar_info_negocio()
+def cargar_info_negocio(tenant_id: str = DEFAULT_TENANT_ID) -> dict:
+    return gestor_tenants.obtener_tenant(tenant_id).business_info
+
+
+def obtener_horario(tenant_id: str = DEFAULT_TENANT_ID) -> dict:
+    info = cargar_info_negocio(tenant_id)
     return {
         "horario": info.get("negocio", {}).get("horario", "Lunes a Viernes 8:00 a 18:00 hs"),
         "esta_abierto": True,
     }
 
 
-def buscar_en_knowledge(consulta: str) -> str:
-    """Busca información relevante en los archivos de /knowledge."""
+def buscar_en_knowledge(consulta: str, tenant_id: str = DEFAULT_TENANT_ID) -> str:
+    """Busca información relevante en los archivos de knowledge/{tenant_id}/."""
     if not consulta or len(consulta) > 500:
         return "Consulta inválida."
 
-    if not KNOWLEDGE_DIR.exists():
+    knowledge_dir = _knowledge_dir(tenant_id)
+    if not knowledge_dir.exists():
         return "No hay archivos de conocimiento disponibles."
 
     resultados = []
-    for ruta in KNOWLEDGE_DIR.iterdir():
+    for ruta in knowledge_dir.iterdir():
         if not ruta.is_file() or ruta.name.startswith("."):
             continue
         try:
             ruta_real = ruta.resolve()
-            ruta_real.relative_to(KNOWLEDGE_DIR)
+            ruta_real.relative_to(knowledge_dir)
         except ValueError:
             logger.warning(f"Symlink fuera de knowledge/ ignorado: {ruta.name}")
             continue

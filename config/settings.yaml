@@ -1,0 +1,19 @@
+# config/settings.yaml — Configuración global del sistema AgentKit
+# Aplica a todos los tenants salvo que su config/tenants/{id}/tenant.yaml lo sobreescriba.
+
+defaults:
+  # Canales habilitados por defecto para un tenant nuevo
+  canales:
+    - whatsapp_twilio
+
+  # Tools que el agente puede usar por defecto
+  tools:
+    - knowledge_search
+    - registrar_lead
+    - escalar_a_humano
+
+  # Límites operativos por defecto
+  limites:
+    rate_limit_mensajes: 10
+    rate_limit_ventana_segundos: 60
+    max_tokens_dia: 100000

@@ -9,7 +9,12 @@ from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
-from agent.memory import inicializar_db, guardar_mensaje, obtener_historial
+from agent.memory import (
+    inicializar_db,
+    obtener_o_crear_usuario,
+    guardar_mensaje,
+    obtener_historial,
+)
 from agent.channels import obtener_canal
 from agent.security import (
     validar_configuracion,
@@ -93,13 +98,18 @@ async def webhook_handler(request: Request):
             if not msg.texto:
                 continue
 
-            logger.info(f"Mensaje de {msg.usuario_id}: {msg.texto}")
+            logger.info(f"[{msg.tenant_id}] Mensaje de {msg.usuario_id}: {msg.texto}")
 
-            historial = await obtener_historial(msg.usuario_id)
-            respuesta = await generar_respuesta(msg.texto, historial)
+            # Resolver el usuario interno (lo crea si es la primera vez)
+            usuario_pk = await obtener_o_crear_usuario(
+                msg.tenant_id, msg.canal.value, msg.usuario_id, msg.usuario_nombre
+            )
 
-            await guardar_mensaje(msg.usuario_id, "user", msg.texto)
-            await guardar_mensaje(msg.usuario_id, "assistant", respuesta)
+            historial = await obtener_historial(msg.tenant_id, usuario_pk)
+            respuesta = await generar_respuesta(msg.texto, historial, msg.tenant_id)
+
+            await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "user", msg.texto)
+            await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "assistant", respuesta)
 
             # Partir en bloques si hay párrafos dobles o la respuesta es larga
             bloques = [b.strip() for b in respuesta.split("\n\n") if b.strip()]

@@ -1,4 +1,4 @@
-# tests/test_local.py — Simulador de chat en terminal para HELIX · AI
+# tests/test_local.py — Simulador de chat en terminal (multi-canal / multi-tenant)
 import asyncio
 import sys
 import os
@@ -6,17 +6,34 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.brain import generar_respuesta
-from agent.memory import inicializar_db, guardar_mensaje, obtener_historial, limpiar_historial
+from agent.memory import (
+    inicializar_db,
+    obtener_o_crear_usuario,
+    guardar_mensaje,
+    obtener_historial,
+    limpiar_historial,
+)
+from agent.tenants import gestor_tenants, DEFAULT_TENANT_ID
 
-TELEFONO_TEST = "test-local-001"
+# Simulamos un usuario que escribe por un canal concreto a un tenant concreto
+CANAL_TEST = "whatsapp_twilio"
+IDENTIFICADOR_TEST = "test-local-001"
 
 
 async def main():
     await inicializar_db()
 
+    tenant_id = os.getenv("DEFAULT_TENANT_ID", DEFAULT_TENANT_ID)
+    cfg = gestor_tenants.obtener_tenant(tenant_id)
+    agente = cfg.prompts.get("nombre") or "Agente"
+
+    usuario_pk = await obtener_o_crear_usuario(
+        tenant_id, CANAL_TEST, IDENTIFICADOR_TEST, "Tester"
+    )
+
     print()
     print("=" * 55)
-    print("   Sofía — Agente HELIX · AI — Test Local")
+    print(f"   Test Local — tenant: {tenant_id} ({cfg.nombre})")
     print("=" * 55)
     print()
     print("  Escribí mensajes como si fueras un cliente.")
@@ -42,19 +59,19 @@ async def main():
             break
 
         if mensaje.lower() == "limpiar":
-            await limpiar_historial(TELEFONO_TEST)
+            await limpiar_historial(tenant_id, usuario_pk)
             print("[Historial borrado]\n")
             continue
 
-        historial = await obtener_historial(TELEFONO_TEST)
+        historial = await obtener_historial(tenant_id, usuario_pk)
 
-        print("\nSofía: ", end="", flush=True)
-        respuesta = await generar_respuesta(mensaje, historial)
+        print("\nAgente: ", end="", flush=True)
+        respuesta = await generar_respuesta(mensaje, historial, tenant_id)
         print(respuesta)
         print()
 
-        await guardar_mensaje(TELEFONO_TEST, "user", mensaje)
-        await guardar_mensaje(TELEFONO_TEST, "assistant", respuesta)
+        await guardar_mensaje(tenant_id, usuario_pk, CANAL_TEST, "user", mensaje)
+        await guardar_mensaje(tenant_id, usuario_pk, CANAL_TEST, "assistant", respuesta)
 
 
 if __name__ == "__main__":

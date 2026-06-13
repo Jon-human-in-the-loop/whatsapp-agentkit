@@ -1,9 +1,10 @@
 # agent/brain.py — Cerebro del agente: conexión con cualquier LLM via LiteLLM
 import os
-import yaml
 import logging
 import litellm
 from dotenv import load_dotenv
+
+from agent.tenants import gestor_tenants, DEFAULT_TENANT_ID
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -27,36 +28,25 @@ if _legacy_key and not os.getenv("ANTHROPIC_API_KEY"):
     os.environ["ANTHROPIC_API_KEY"] = _legacy_key
 
 
-def cargar_config_prompts() -> dict:
-    try:
-        with open("config/prompts.yaml", "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        logger.error("config/prompts.yaml no encontrado")
-        return {}
+def cargar_system_prompt(tenant_id: str = DEFAULT_TENANT_ID) -> str:
+    return gestor_tenants.obtener_tenant(tenant_id).system_prompt
 
 
-def cargar_system_prompt() -> str:
-    config = cargar_config_prompts()
-    return config.get("system_prompt", "Eres un asistente útil. Responde en español.")
+def obtener_mensaje_error(tenant_id: str = DEFAULT_TENANT_ID) -> str:
+    return gestor_tenants.obtener_tenant(tenant_id).error_message
 
 
-def obtener_mensaje_error() -> str:
-    config = cargar_config_prompts()
-    return config.get("error_message", "Lo siento, estoy teniendo problemas técnicos. Por favor intentá de nuevo en unos minutos.")
+def obtener_mensaje_fallback(tenant_id: str = DEFAULT_TENANT_ID) -> str:
+    return gestor_tenants.obtener_tenant(tenant_id).fallback_message
 
 
-def obtener_mensaje_fallback() -> str:
-    config = cargar_config_prompts()
-    return config.get("fallback_message", "Disculpá, no entendí tu mensaje. ¿Podés contarme un poco más?")
-
-
-async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
+async def generar_respuesta(mensaje: str, historial: list[dict],
+                            tenant_id: str = DEFAULT_TENANT_ID) -> str:
     """Genera una respuesta usando el LLM configurado, con fallback automático."""
     if not mensaje or len(mensaje.strip()) < 2:
-        return obtener_mensaje_fallback()
+        return obtener_mensaje_fallback(tenant_id)
 
-    system_prompt = cargar_system_prompt()
+    system_prompt = cargar_system_prompt(tenant_id)
 
     # LiteLLM usa el formato OpenAI: system va como primer mensaje
     mensajes = [{"role": "system", "content": system_prompt}]
@@ -83,4 +73,4 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
 
     except Exception as e:
         logger.error(f"Todos los proveedores LLM fallaron: {e}")
-        return obtener_mensaje_error()
+        return obtener_mensaje_error(tenant_id)

@@ -12,9 +12,15 @@ __pycache__/
 .venv/
 venv/
 
-# Knowledge (archivos privados del negocio)
-knowledge/*
+# Knowledge (archivos privados del negocio, por tenant)
+knowledge/**
+!knowledge/
 !knowledge/.gitkeep
+!knowledge/*/
+!knowledge/*/.gitkeep
+
+# Memoria vectorial (ChromaDB)
+chroma_db/
 
 # Session state
 config/session.yaml

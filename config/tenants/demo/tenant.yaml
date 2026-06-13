@@ -1,0 +1,19 @@
+# config/tenants/demo/tenant.yaml — Metadatos del tenant "demo"
+# Sobreescribe los defaults de config/settings.yaml para este tenant.
+
+nombre: "HELIX · AI — Agencia de Crecimiento Digital e IA"
+
+# Canales habilitados para este tenant
+canales:
+  - whatsapp_twilio
+
+# Tools disponibles para el agente de este tenant
+tools:
+  - knowledge_search
+  - registrar_lead
+  - escalar_a_humano
+
+limites:
+  rate_limit_mensajes: 10
+  rate_limit_ventana_segundos: 60
+  max_tokens_dia: 100000

@@ -5,10 +5,10 @@
 
 import os
 import sys
+import time
 import json
 import hmac
 import hashlib
-import base64
 
 import pytest
 from starlette.requests import Request
@@ -180,3 +180,79 @@ class TestDiscord:
         req = make_request(body, headers=self._firmar(body))
         msgs = await self._canal().parsear_webhook(req)
         assert msgs == []
+
+
+# ─── Slack ───────────────────────────────────────────────────────────────────
+
+class TestSlack:
+    SECRET = "slack-signing-secret-de-prueba-123"
+
+    def setup_method(self):
+        os.environ["SLACK_SIGNING_SECRET"] = self.SECRET
+
+    def teardown_method(self):
+        os.environ.pop("SLACK_SIGNING_SECRET", None)
+
+    def _canal(self):
+        from agent.channels.slack import CanalSlack
+        return CanalSlack("demo")
+
+    def _firmar(self, body: bytes, timestamp: str | None = None) -> dict:
+        timestamp = timestamp or str(int(time.time()))
+        base = b"v0:" + timestamp.encode() + b":" + body
+        firma = "v0=" + hmac.new(self.SECRET.encode(), base, hashlib.sha256).hexdigest()
+        return {"X-Slack-Request-Timestamp": timestamp, "X-Slack-Signature": firma}
+
+    async def test_url_verification_devuelve_challenge(self):
+        body = json.dumps({"type": "url_verification", "challenge": "abc123"}).encode()
+        req = make_request(body, headers=self._firmar(body))
+        assert await self._canal().validar_webhook(req) == "abc123"
+
+    async def test_firma_invalida_rechaza(self):
+        from fastapi import HTTPException
+        body = json.dumps({"type": "url_verification", "challenge": "x"}).encode()
+        headers = {"X-Slack-Request-Timestamp": str(int(time.time())),
+                   "X-Slack-Signature": "v0=deadbeef"}
+        with pytest.raises(HTTPException) as exc:
+            await self._canal().validar_webhook(make_request(body, headers=headers))
+        assert exc.value.status_code == 403
+
+    async def test_replay_viejo_rechaza(self):
+        from fastapi import HTTPException
+        viejo = str(int(time.time()) - 10000)
+        body = json.dumps({"type": "url_verification", "challenge": "x"}).encode()
+        req = make_request(body, headers=self._firmar(body, timestamp=viejo))
+        with pytest.raises(HTTPException) as exc:
+            await self._canal().validar_webhook(req)
+        assert exc.value.status_code == 403
+
+    async def test_normaliza_evento_mensaje(self):
+        evento = {
+            "type": "event_callback",
+            "event": {
+                "type": "message", "text": "Necesito ayuda",
+                "user": "U001", "channel": "C123", "ts": "1700000000.000100",
+            },
+        }
+        body = json.dumps(evento).encode()
+        req = make_request(body, headers=self._firmar(body))
+        msgs = await self._canal().parsear_webhook(req)
+        assert len(msgs) == 1
+        m = msgs[0]
+        assert m.canal == TipoCanal.SLACK
+        assert m.usuario_id == "C123"
+        assert m.texto == "Necesito ayuda"
+        assert m.mensaje_id == "C123:1700000000.000100"
+        assert m.metadata.get("user") == "U001"
+        assert m.es_propio is False
+
+    async def test_ignora_mensaje_de_bot(self):
+        evento = {
+            "type": "event_callback",
+            "event": {"type": "message", "text": "soy bot", "channel": "C1",
+                      "ts": "1.1", "bot_id": "B999"},
+        }
+        body = json.dumps(evento).encode()
+        req = make_request(body, headers=self._firmar(body))
+        msgs = await self._canal().parsear_webhook(req)
+        assert msgs[0].es_propio is True

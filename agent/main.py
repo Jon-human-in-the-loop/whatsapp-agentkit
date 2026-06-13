@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse, JSONResponse, Response
 from dotenv import load_dotenv
 
-from agent.brain import generar_respuesta
+from agent.brain import ejecutar_agente, serializar_tool_calls
 from agent.memory import (
     inicializar_db,
     obtener_o_crear_usuario,
@@ -150,13 +150,17 @@ async def procesar_mensaje(canal_obj: CanalBase, msg: MensajeUnificado) -> None:
         contexto_rag = await buscar_en_knowledge(msg.tenant_id, texto)
         contexto_memoria = await recuperar_contexto_relevante(msg.tenant_id, usuario_pk, texto)
 
-        respuesta = await generar_respuesta(
+        respuesta, tool_calls = await ejecutar_agente(
             texto, historial, msg.tenant_id,
             contexto_rag=contexto_rag, contexto_memoria=contexto_memoria,
+            usuario_id=usuario_pk,
         )
 
         await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "user", texto)
-        await guardar_mensaje(msg.tenant_id, usuario_pk, msg.canal.value, "assistant", respuesta)
+        await guardar_mensaje(
+            msg.tenant_id, usuario_pk, msg.canal.value, "assistant", respuesta,
+            tool_calls_json=serializar_tool_calls(tool_calls),
+        )
 
         # Si la conversación acumuló suficientes mensajes, resumir para la memoria larga
         await guardar_resumen_si_necesario(msg.tenant_id, usuario_pk)

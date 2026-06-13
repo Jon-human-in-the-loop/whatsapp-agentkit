@@ -66,7 +66,7 @@ async def main():
         historial = await obtener_historial(tenant_id, usuario_pk)
 
         print("\nAgente: ", end="", flush=True)
-        respuesta = await generar_respuesta(mensaje, historial, tenant_id)
+        respuesta = await generar_respuesta(mensaje, historial, tenant_id, usuario_id=usuario_pk)
         print(respuesta)
         print()
 

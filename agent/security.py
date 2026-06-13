@@ -22,7 +22,7 @@ MENSAJES_PROCESADOS_TTL = 3600
 def validar_configuracion() -> None:
     """Falla rápido al arrancar si falta configuración crítica."""
     proveedor = os.getenv("WHATSAPP_PROVIDER", "").lower()
-    requeridas = ["LLM_API_KEY", "LLM_MODEL", "WHATSAPP_PROVIDER"]
+    requeridas = ["WHATSAPP_PROVIDER"]
     if proveedor == "meta":
         requeridas += ["META_ACCESS_TOKEN", "META_PHONE_NUMBER_ID",
                        "META_VERIFY_TOKEN", "META_APP_SECRET"]
@@ -31,6 +31,11 @@ def validar_configuracion() -> None:
                        "TWILIO_PHONE_NUMBER"]
 
     faltan = [v for v in requeridas if not os.getenv(v)]
+
+    # La API key del LLM puede venir como ANTHROPIC_API_KEY o LLM_API_KEY (legacy)
+    if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY")):
+        faltan.append("ANTHROPIC_API_KEY")
+
     if faltan:
         logger.error(f"Variables faltantes en .env: {', '.join(faltan)}")
         sys.exit(1)
